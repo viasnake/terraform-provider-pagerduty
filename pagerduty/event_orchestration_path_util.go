@@ -448,7 +448,13 @@ func checkExistingOrchestrationPathConfig(ctx context.Context, client *pagerduty
 		path, _, err := client.EventOrchestrationPaths.GetContext(ctx, orchID, pathType)
 		if err != nil {
 			if isErrCode(err, http.StatusForbidden) {
-				return nil
+				// For service paths the API returns 403 (not 404) when the parent
+				// service has been deleted; treat it as "no existing config".
+				// For other path types a 403 is a real permission error.
+				if pathType == "service" {
+					return nil
+				}
+				return retry.NonRetryableError(err)
 			}
 			if isErrCode(err, http.StatusBadRequest) {
 				return retry.NonRetryableError(err)
@@ -483,7 +489,10 @@ func checkExistingOrchestrationPathConfig(ctx context.Context, client *pagerduty
 	} else {
 		if existingPath.CatchAll != nil && existingPath.CatchAll.Actions != nil {
 			a := existingPath.CatchAll.Actions
-			if a.Suppress || a.DropEvent || a.Priority != "" || a.Severity != "" ||
+			// The unrouted path always has suppress=true set by the API; exclude it
+			// from the trivial check so a fresh orchestration is never falsely blocked.
+			suppressNonTrivial := a.Suppress && pathType != "unrouted"
+			if suppressNonTrivial || a.DropEvent || a.Priority != "" || a.Severity != "" ||
 				a.EventAction != "" || a.Annotate != "" || a.RouteTo != "" ||
 				a.Suspend != nil || a.EscalationPolicy != nil ||
 				len(a.Variables) > 0 || len(a.Extractions) > 0 ||

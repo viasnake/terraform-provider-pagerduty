@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/heimweh/go-pagerduty/pagerduty"
 )
 
 func init() {
@@ -171,6 +172,83 @@ func TestAccPagerDutyEventOrchestrationPathGlobal_Basic(t *testing.T) {
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckPagerDutyEventOrchestrationServicePathNotExists(res),
 				),
+			},
+		},
+	})
+}
+
+func TestAccPagerDutyEventOrchestrationPathGlobal_OverwriteGuard(t *testing.T) {
+	team := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	escalationPolicy := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	service := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	orch := fmt.Sprintf("tf-%s", acctest.RandString(5))
+
+	res := "pagerduty_event_orchestration_global.my_global_orch"
+	orchRes := "pagerduty_event_orchestration.orch"
+
+	injectNonTrivialConfig := func(s *terraform.State) error {
+		orchState, ok := s.RootModule().Resources[orchRes]
+		if !ok {
+			return fmt.Errorf("Orchestration resource not found: %s", orchRes)
+		}
+		orchID := orchState.Primary.ID
+
+		client, _ := testAccProvider.Meta().(*Config).Client()
+		emptyActions := func() *pagerduty.EventOrchestrationPathRuleActions {
+			return &pagerduty.EventOrchestrationPathRuleActions{
+				PagerdutyAutomationActions: []*pagerduty.EventOrchestrationPathPagerdutyAutomationAction{},
+				AutomationActions:          []*pagerduty.EventOrchestrationPathAutomationAction{},
+				Variables:                  []*pagerduty.EventOrchestrationPathActionVariables{},
+				Extractions:                []*pagerduty.EventOrchestrationPathActionExtractions{},
+				IncidentCustomFieldUpdates: []*pagerduty.EventOrchestrationPathIncidentCustomFieldUpdate{},
+			}
+		}
+		ruleActions := emptyActions()
+		ruleActions.Severity = "critical"
+		payload := &pagerduty.EventOrchestrationPath{
+			Parent: &pagerduty.EventOrchestrationPathReference{ID: orchID},
+			Sets: []*pagerduty.EventOrchestrationPathSet{
+				{
+					ID: "start",
+					Rules: []*pagerduty.EventOrchestrationPathRule{
+						{
+							Label:      "injected rule",
+							Conditions: []*pagerduty.EventOrchestrationPathRuleCondition{},
+							Actions:    ruleActions,
+						},
+					},
+				},
+			},
+			CatchAll: &pagerduty.EventOrchestrationPathCatchAll{
+				Actions: emptyActions(),
+			},
+		}
+		_, _, err := client.EventOrchestrationPaths.UpdateContext(context.Background(), orchID, "global", payload)
+		return err
+	}
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckPagerDutyEventOrchestrationGlobalPathDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationGlobalDefaultConfig(team, escalationPolicy, service, orch),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyEventOrchestrationGlobalExists(res),
+				),
+			},
+			{
+				Config: testAccCheckPagerDutyEventOrchestrationPathGlobalResourceDeleteConfig(team, escalationPolicy, service, orch),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyEventOrchestrationServicePathNotExists(res),
+					injectNonTrivialConfig,
+				),
+			},
+			{
+				Config:      testAccCheckPagerDutyEventOrchestrationGlobalDefaultConfig(team, escalationPolicy, service, orch),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`has existing configuration that might be overwritten`),
 			},
 		},
 	})
