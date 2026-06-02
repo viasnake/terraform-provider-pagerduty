@@ -173,7 +173,8 @@ The following attributes are exported:
 
 Global Orchestration can be imported using the `id` of the Event Orchestration, e.g.
 
-
 ```
 $ terraform import pagerduty_event_orchestration_global.global 1b49abe7-26db-4439-a715-c6d883acfb3e
 ```
+
+-> **Note:** If Terraform reports an error like _"has existing configuration that might be overwritten; please import this resource before creating it"_, the global orchestration path already has rules or non-default catch-all settings that Terraform does not yet manage. Run the import command above to bring that existing configuration into your Terraform state, then re-run `terraform apply`.
