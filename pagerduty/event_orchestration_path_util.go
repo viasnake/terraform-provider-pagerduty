@@ -489,6 +489,10 @@ func checkExistingOrchestrationPathConfig(ctx context.Context, client *pagerduty
 	} else {
 		if existingPath.CatchAll != nil && existingPath.CatchAll.Actions != nil {
 			a := existingPath.CatchAll.Actions
+			// Mirror every field of EventOrchestrationPathRuleActions; update here when
+			// new action fields are added to that struct in go-pagerduty.
+			// DynamicRouteTo is router-only and intentionally omitted (never set on
+			// non-router catch_all by the API).
 			// The unrouted path always has suppress=true set by the API; exclude it
 			// from the trivial check so a fresh orchestration is never falsely blocked.
 			suppressNonTrivial := a.Suppress && pathType != "unrouted"
