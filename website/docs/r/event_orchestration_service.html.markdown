@@ -254,3 +254,5 @@ Service Orchestration can be imported using the `id` of the Service, e.g.
 ```
 $ terraform import pagerduty_event_orchestration_service.service PFEODA7
 ```
+
+-> **Note:** If Terraform reports an error like _"has existing configuration that might be overwritten; please import this resource before creating it"_, the service orchestration path already has rules or non-default catch-all settings that Terraform does not yet manage. Run the import command above to bring that existing configuration into your Terraform state, then re-run `terraform apply`.

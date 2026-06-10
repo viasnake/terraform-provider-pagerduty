@@ -3,8 +3,11 @@ package pagerduty
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/heimweh/go-pagerduty/pagerduty"
 )
@@ -432,6 +435,92 @@ func convertEventOrchestrationPathWarningsToDiagnostics(warnings []*pagerduty.Ev
 	}
 
 	return diags
+}
+
+// checkExistingOrchestrationPathConfig fetches the current path config for
+// pathType ("service", "global", "router", "unrouted") and returns an error if
+// non-trivial configuration already exists that would be silently overwritten.
+// resourceType is the Terraform resource name used in the import hint.
+func checkExistingOrchestrationPathConfig(ctx context.Context, client *pagerduty.Client, orchID, pathType, resourceType string) error {
+	var existingPath *pagerduty.EventOrchestrationPath
+
+	retryErr := retry.RetryContext(ctx, 5*time.Second, func() *retry.RetryError {
+		path, _, err := client.EventOrchestrationPaths.GetContext(ctx, orchID, pathType)
+		if err != nil {
+			if isErrCode(err, http.StatusForbidden) {
+				// For service paths the API returns 403 (not 404) when the parent
+				// service has been deleted; treat it as "no existing config".
+				// For other path types a 403 is a real permission error.
+				if pathType == "service" {
+					return nil
+				}
+				return retry.NonRetryableError(err)
+			}
+			if isErrCode(err, http.StatusBadRequest) {
+				return retry.NonRetryableError(err)
+			}
+			return retry.RetryableError(err)
+		}
+		existingPath = path
+		return nil
+	})
+
+	if retryErr != nil {
+		return retryErr
+	}
+
+	if existingPath == nil {
+		return nil
+	}
+
+	hasNonTrivialConfig := false
+
+	if pathType == "router" {
+		// Router is trivial when catch_all routes to "unrouted" and there are no rules.
+		if existingPath.CatchAll != nil && existingPath.CatchAll.Actions != nil {
+			rt := existingPath.CatchAll.Actions.RouteTo
+			if rt != "" && rt != "unrouted" {
+				hasNonTrivialConfig = true
+			}
+		}
+		if !hasNonTrivialConfig && len(existingPath.Sets) > 0 && len(existingPath.Sets[0].Rules) > 0 {
+			hasNonTrivialConfig = true
+		}
+	} else {
+		if existingPath.CatchAll != nil && existingPath.CatchAll.Actions != nil {
+			a := existingPath.CatchAll.Actions
+			// Mirror every field of EventOrchestrationPathRuleActions; update here when
+			// new action fields are added to that struct in go-pagerduty.
+			// DynamicRouteTo is router-only and intentionally omitted (never set on
+			// non-router catch_all by the API).
+			// The unrouted path always has suppress=true set by the API; exclude it
+			// from the trivial check so a fresh orchestration is never falsely blocked.
+			suppressNonTrivial := a.Suppress && pathType != "unrouted"
+			if suppressNonTrivial || a.DropEvent || a.Priority != "" || a.Severity != "" ||
+				a.EventAction != "" || a.Annotate != "" || a.RouteTo != "" ||
+				a.Suspend != nil || a.EscalationPolicy != nil ||
+				len(a.Variables) > 0 || len(a.Extractions) > 0 ||
+				len(a.AutomationActions) > 0 || len(a.PagerdutyAutomationActions) > 0 ||
+				len(a.IncidentCustomFieldUpdates) > 0 {
+				hasNonTrivialConfig = true
+			}
+		}
+		if !hasNonTrivialConfig {
+			if len(existingPath.Sets) >= 2 || (len(existingPath.Sets) > 0 && len(existingPath.Sets[0].Rules) > 0) {
+				hasNonTrivialConfig = true
+			}
+		}
+	}
+
+	if hasNonTrivialConfig {
+		return fmt.Errorf(
+			"the %s orchestration (ID: %s) has existing configuration that might be overwritten; "+
+				"please import this resource before creating it using: terraform import %s.<resource_name> %s",
+			pathType, orchID, resourceType, orchID,
+		)
+	}
+
+	return nil
 }
 
 func emptyOrchestrationPathStructBuilder(pathType string) *pagerduty.EventOrchestrationPath {

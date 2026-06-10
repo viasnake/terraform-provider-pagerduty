@@ -110,6 +110,28 @@ func buildEventOrchestrationPathServiceRuleActionsSchema() map[string]*schema.Sc
 	return a
 }
 
+func customizeDiffServiceOrchestration(ctx context.Context, diff *schema.ResourceDiff, meta interface{}) error {
+	if err := checkExtractions(ctx, diff, meta); err != nil {
+		return err
+	}
+
+	if diff.Id() != "" {
+		return nil
+	}
+
+	serviceID, ok := diff.GetOk("service")
+	if !ok {
+		return nil
+	}
+
+	client, err := meta.(*Config).Client()
+	if err != nil {
+		return err
+	}
+
+	return checkExistingOrchestrationPathConfig(ctx, client, serviceID.(string), "service", "pagerduty_event_orchestration_service")
+}
+
 func resourcePagerDutyEventOrchestrationPathService() *schema.Resource {
 	return &schema.Resource{
 		ReadContext:   resourcePagerDutyEventOrchestrationPathServiceRead,
@@ -119,7 +141,7 @@ func resourcePagerDutyEventOrchestrationPathService() *schema.Resource {
 		Importer: &schema.ResourceImporter{
 			StateContext: resourcePagerDutyEventOrchestrationPathServiceImport,
 		},
-		CustomizeDiff: checkExtractions,
+		CustomizeDiff: customizeDiffServiceOrchestration,
 		Schema: map[string]*schema.Schema{
 			"service": {
 				Type:     schema.TypeString,
@@ -272,6 +294,15 @@ func resourcePagerDutyEventOrchestrationPathServiceRead(ctx context.Context, d *
 }
 
 func resourcePagerDutyEventOrchestrationPathServiceCreate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	client, err := meta.(*Config).Client()
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	if err := checkExistingOrchestrationPathConfig(ctx, client, d.Get("service").(string), "service", "pagerduty_event_orchestration_service"); err != nil {
+		return diag.FromErr(err)
+	}
+
 	return resourcePagerDutyEventOrchestrationPathServiceUpdate(ctx, d, meta)
 }
 
