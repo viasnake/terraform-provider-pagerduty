@@ -262,6 +262,7 @@ func (r *resourceScheduleV2) createRotationsAndEvents(ctx context.Context, sched
 			// The API normalizes past effective_since dates to current time. Preserve
 			// the config value so the post-apply state matches the plan.
 			flattened.EffectiveSince = evtModel.EffectiveSince
+			preserveConfiguredEventTimes(&evtModel, &flattened)
 			preserveShiftsPerMember(&evtModel, &flattened)
 			updatedEvents = append(updatedEvents, flattened)
 		}
@@ -319,7 +320,7 @@ func (r *resourceScheduleV2) Read(ctx context.Context, req resource.ReadRequest,
 		}
 	}
 
-	updatedState := flattenScheduleV3(ctx, schedule, state.Rotations, &resp.Diagnostics)
+	updatedState := flattenScheduleV3(ctx, schedule, state.Rotations, state.Teams, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -509,6 +510,7 @@ func (r *resourceScheduleV2) reconcileEvents(ctx context.Context, scheduleID, ro
 			// Preserve the user's configured effective_since in state so subsequent
 			// plans do not show a perpetual diff.
 			flattened.EffectiveSince = desiredEvt.EffectiveSince
+			preserveConfiguredEventTimes(&desiredEvt, &flattened)
 			preserveShiftsPerMember(&desiredEvt, &flattened)
 			updatedEvents = append(updatedEvents, flattened)
 			continue
@@ -547,6 +549,7 @@ func (r *resourceScheduleV2) reconcileEvents(ctx context.Context, scheduleID, ro
 		// The API normalizes past effective_since dates to current time. Preserve
 		// the plan value so the post-apply state matches the plan.
 		flattened.EffectiveSince = desiredEvt.EffectiveSince
+		preserveConfiguredEventTimes(&desiredEvt, &flattened)
 		preserveShiftsPerMember(&desiredEvt, &flattened)
 		updatedEvents = append(updatedEvents, flattened)
 	}
@@ -603,6 +606,7 @@ func (r *resourceScheduleV2) reconcileEvents(ctx context.Context, scheduleID, ro
 		// The API normalizes past effective_since dates to current time. Preserve
 		// the plan value so the post-apply state matches the plan.
 		flattened.EffectiveSince = desiredEvt.EffectiveSince
+		preserveConfiguredEventTimes(&desiredEvt, &flattened)
 		preserveShiftsPerMember(&desiredEvt, &flattened)
 		updatedEvents = append(updatedEvents, flattened)
 	}
@@ -672,7 +676,7 @@ func (r *resourceScheduleV2) ImportState(ctx context.Context, req resource.Impor
 		}
 	}
 
-	state := flattenScheduleV3(ctx, schedule, nil, &resp.Diagnostics)
+	state := flattenScheduleV3(ctx, schedule, nil, types.ListNull(types.StringType), &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -787,16 +791,19 @@ func buildEventV3Input(ctx context.Context, model *eventV2Model, scheduleTimeZon
 	return evt, diags
 }
 
-func flattenScheduleV3(ctx context.Context, schedule *pagerduty.ScheduleV3, stateRotations []rotationV2Model, diags *diag.Diagnostics) resourceScheduleV2Model {
+func flattenScheduleV3(ctx context.Context, schedule *pagerduty.ScheduleV3, stateRotations []rotationV2Model, priorTeams types.List, diags *diag.Diagnostics) resourceScheduleV2Model {
 	// The v3 API normalizes "UTC" to "Etc/UTC". Normalize back to prevent perpetual plan diffs.
 	tz := schedule.TimeZone
 	if tz == "Etc/UTC" {
 		tz = "UTC"
 	}
 
-	teamVals := make([]attr.Value, 0, len(schedule.Teams))
-	for _, t := range schedule.Teams {
-		teamVals = append(teamVals, types.StringValue(t.ID))
+	// The API returns associated teams in an unstable order; preserve the prior
+	// state's ordering to avoid a perpetual reorder diff on the `teams` list.
+	teamIDs := orderedTeamIDs(ctx, priorTeams, schedule.Teams, diags)
+	teamVals := make([]attr.Value, 0, len(teamIDs))
+	for _, id := range teamIDs {
+		teamVals = append(teamVals, types.StringValue(id))
 	}
 	var teamsList types.List
 	if len(teamVals) == 0 {
@@ -1059,6 +1066,53 @@ func preserveShiftsPerMember(desired, flattened *eventV2Model) {
 	if len(desired.AssignmentStrategy) > 0 && len(flattened.AssignmentStrategy) > 0 {
 		flattened.AssignmentStrategy[0].ShiftsPerMember = desired.AssignmentStrategy[0].ShiftsPerMember
 	}
+}
+
+// preserveConfiguredEventTimes keeps the user's configured start_time/end_time
+// strings in state when they represent the same instant the API returned. The v3
+// API normalizes times to UTC (e.g. "...+02:00" becomes "...Z"), so without this
+// the create/update paths would store a different string than the plan, tripping
+// Terraform's "provider produced inconsistent result after apply" check.
+func preserveConfiguredEventTimes(desired, flattened *eventV2Model) {
+	if !desired.StartTime.IsNull() && semanticallyEqualTime(desired.StartTime.ValueString(), flattened.StartTime.ValueString()) {
+		flattened.StartTime = desired.StartTime
+	}
+	if !desired.EndTime.IsNull() && semanticallyEqualTime(desired.EndTime.ValueString(), flattened.EndTime.ValueString()) {
+		flattened.EndTime = desired.EndTime
+	}
+}
+
+// orderedTeamIDs reconciles the API's team list against the order recorded in
+// prior state. The v3 API returns associated teams in an unstable order, which
+// would otherwise show as a perpetual reorder diff on a `teams` list. Team IDs
+// present in prior state keep their original position; teams added out-of-band
+// (present in the API response but not in state) are appended in API order.
+func orderedTeamIDs(ctx context.Context, priorTeams types.List, apiTeams []pagerduty.TeamReferenceV3, diags *diag.Diagnostics) []string {
+	inAPI := make(map[string]bool, len(apiTeams))
+	for _, t := range apiTeams {
+		inAPI[t.ID] = true
+	}
+
+	var prior []string
+	if !priorTeams.IsNull() && !priorTeams.IsUnknown() {
+		diags.Append(priorTeams.ElementsAs(ctx, &prior, false)...)
+	}
+
+	result := make([]string, 0, len(apiTeams))
+	seen := make(map[string]bool, len(apiTeams))
+	for _, id := range prior {
+		if inAPI[id] && !seen[id] {
+			result = append(result, id)
+			seen[id] = true
+		}
+	}
+	for _, t := range apiTeams {
+		if !seen[t.ID] {
+			result = append(result, t.ID)
+			seen[t.ID] = true
+		}
+	}
+	return result
 }
 
 // semanticallyEqualTime returns true if two RFC3339 time strings represent the same instant.

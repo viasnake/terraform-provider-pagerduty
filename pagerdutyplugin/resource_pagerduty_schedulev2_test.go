@@ -769,3 +769,135 @@ resource "pagerduty_escalation_policy" "test" {
 }
 `, username, email, scheduleName, startTime, endTime, effectiveSince, escalationPolicyName)
 }
+
+// TestAccPagerDutyScheduleV2_MultipleTeamsOrderStable reproduces the team
+// reorder perpetual diff (same class as issue #1001): the v3 API returns a
+// schedule's associated teams in an unstable order, so a `teams` list with more
+// than one entry would show a spurious reorder on every plan. The provider must
+// preserve the prior-state ordering on refresh so re-planning yields no diff.
+func TestAccPagerDutyScheduleV2_MultipleTeamsOrderStable(t *testing.T) {
+	if v := os.Getenv("PAGERDUTY_ACC_SCHEDULE_V3"); v == "" {
+		t.Skip("PAGERDUTY_ACC_SCHEDULE_V3 must be set to run v3 schedule acceptance tests")
+	}
+	username := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	email := fmt.Sprintf("%s@foo.test", username)
+	team1 := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	team2 := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	scheduleName := fmt.Sprintf("tf-%s", acctest.RandString(5))
+
+	effectiveSince := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	startTime := time.Now().UTC().Add(24*time.Hour).Format("2006-01-02") + "T09:00:00Z"
+	endTime := time.Now().UTC().Add(24*time.Hour).Format("2006-01-02") + "T17:00:00Z"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(),
+		CheckDestroy:             testAccCheckPagerDutyScheduleV2Destroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccPagerDutyScheduleV2MultipleTeamsConfig(username, email, team1, team2, scheduleName, effectiveSince, startTime, endTime),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyScheduleV2Exists("pagerduty_schedulev2.test"),
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "teams.#", "2"),
+				),
+			},
+			{
+				// Re-plan with the same config. Fails if the unordered API team
+				// response produces a perpetual reorder diff.
+				Config:             testAccPagerDutyScheduleV2MultipleTeamsConfig(username, email, team1, team2, scheduleName, effectiveSince, startTime, endTime),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
+}
+
+// TestAccPagerDutyScheduleV2_OffsetTimestamps reproduces the "inconsistent
+// result after apply" failure on start_time/end_time supplied with a timezone
+// offset (e.g. "+02:00"). The v3 API normalizes those to UTC ("Z"), so the
+// provider must preserve the configured strings in state when they represent the
+// same instant — both at apply time (consistency check) and on refresh (no diff).
+func TestAccPagerDutyScheduleV2_OffsetTimestamps(t *testing.T) {
+	if v := os.Getenv("PAGERDUTY_ACC_SCHEDULE_V3"); v == "" {
+		t.Skip("PAGERDUTY_ACC_SCHEDULE_V3 must be set to run v3 schedule acceptance tests")
+	}
+	username := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	email := fmt.Sprintf("%s@foo.test", username)
+	scheduleName := fmt.Sprintf("tf-%s", acctest.RandString(5))
+
+	day := time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02")
+	startTime := day + "T09:00:00+02:00"
+	endTime := day + "T17:00:00+02:00"
+	effectiveSince := day + "T09:00:00+02:00"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(),
+		CheckDestroy:             testAccCheckPagerDutyScheduleV2Destroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccPagerDutyScheduleV2Config(username, email, scheduleName, effectiveSince, startTime, endTime),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyScheduleV2Exists("pagerduty_schedulev2.test"),
+					// State must hold the configured offset strings, not the API's UTC form.
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "rotation.0.event.0.start_time", startTime),
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "rotation.0.event.0.end_time", endTime),
+				),
+			},
+			{
+				// Re-plan with the same config. Fails if the UTC-normalized read
+				// value is not reconciled against the configured offset value.
+				Config:             testAccPagerDutyScheduleV2Config(username, email, scheduleName, effectiveSince, startTime, endTime),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
+}
+
+func testAccPagerDutyScheduleV2MultipleTeamsConfig(username, email, team1, team2, scheduleName, effectiveSince, startTime, endTime string) string {
+	return fmt.Sprintf(`
+resource "pagerduty_user" "test" {
+  name  = "%s"
+  email = "%s"
+}
+
+resource "pagerduty_team" "test1" {
+  name = "%s"
+}
+
+resource "pagerduty_team" "test2" {
+  name = "%s"
+}
+
+resource "pagerduty_schedulev2" "test" {
+  name        = "%s"
+  time_zone   = "America/New_York"
+  description = "Managed by Terraform"
+
+  teams = [
+    pagerduty_team.test1.id,
+    pagerduty_team.test2.id,
+  ]
+
+  rotation {
+    event {
+      name            = "Weekly On-Call"
+      start_time      = "%s"
+      end_time        = "%s"
+      effective_since = "%s"
+      recurrence      = ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"]
+
+      assignment_strategy {
+        type = "rotating_member_assignment_strategy"
+
+        member {
+          type    = "user_member"
+          user_id = pagerduty_user.test.id
+        }
+      }
+    }
+  }
+}
+`, username, email, team1, team2, scheduleName, startTime, endTime, effectiveSince)
+}

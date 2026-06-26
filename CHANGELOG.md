@@ -1,3 +1,13 @@
+## v3.33.1 (Unreleased)
+
+BUG FIXES
+* `resource/pagerduty_schedulev2`: Preserve the configured `teams` ordering on refresh so a schedule associated with more than one team no longer shows a perpetual reorder diff ([1127](https://github.com/PagerDuty/terraform-provider-pagerduty/issues/1127))
+* `resource/pagerduty_schedulev2`: Preserve timezone-offset `start_time`/`end_time` values when they match the API's UTC-normalized return, so applying events with offset timestamps no longer fails with "Provider produced inconsistent result after apply" ([1127](https://github.com/PagerDuty/terraform-provider-pagerduty/issues/1127))
+
+DOCS
+* `resource/pagerduty_schedulev2`: Remove the obsolete `flexible-schedules-early-access` note, add a legacy-vs-shift-based version mapping table, and add a `pagerduty_schedule` → `pagerduty_schedulev2` migration guide ([1127](https://github.com/PagerDuty/terraform-provider-pagerduty/issues/1127))
+* `data/pagerduty_schedulev2`: Remove the obsolete `flexible-schedules-early-access` note ([1127](https://github.com/PagerDuty/terraform-provider-pagerduty/issues/1127))
+
 ## v3.33.0 (Jun 10, 2026)
 
 ENHANCEMENTS
