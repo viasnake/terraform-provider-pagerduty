@@ -10,7 +10,16 @@ description: |-
 
 A [v3 schedule](https://developer.pagerduty.com/api-reference/d90c4c94e3ce2-create-a-schedule) determines the time periods that users are on call using flexible rotation configurations. This resource uses the PagerDuty v3 Schedules API, which supports per-event assignment strategies and RFC 5545 recurrence rules.
 
-~> **Note:** This resource requires the `flexible-schedules-early-access` early access flag on your PagerDuty account. The required `X-Early-Access` header is sent automatically by the provider.
+## Schedule versions and resource naming
+
+The Terraform resource names do not line up one-to-one with the API version numbers, which is a common source of confusion. The table below maps the two:
+
+| Schedule type        | Terraform resource     | API version            |
+| -------------------- | ---------------------- | ---------------------- |
+| Legacy schedule      | `pagerduty_schedule`   | v2 (Accept header)     |
+| Shift-based schedule | `pagerduty_schedulev2` | v3 (in the URL path)   |
+
+`pagerduty_schedule` manages the legacy schedule (now deprecated); `pagerduty_schedulev2` manages the newer shift-based schedule. In the UI, legacy schedules are marked with a `legacy` tag on the schedules list page.
 
 ## Example Usage
 
@@ -91,6 +100,116 @@ resource "pagerduty_schedulev2" "all_hands" {
   }
 }
 ```
+
+## Migrating from `pagerduty_schedule`
+
+The legacy `pagerduty_schedule` resource models on-call coverage with `layer` blocks (a list of `users` rotating on a fixed `rotation_turn_length_seconds`, optionally constrained by `restriction` blocks). The shift-based `pagerduty_schedulev2` resource models the same coverage with `rotation` → `event` blocks, where an `assignment_strategy` decides how the listed `member`s cover each occurrence of an RFC 5545 `recurrence`.
+
+The most common legacy shape is a single layer with several users handing off once per week (a 24/7 weekly rotation) and one or more team associations. The example below shows that shape before and after migration.
+
+**Before** — legacy `pagerduty_schedule` (single `OnCall` layer, six users, weekly handoff, two teams):
+
+```hcl
+resource "pagerduty_schedule" "example_oncall" {
+  name        = "Example OnCall Schedule"
+  description = "A Example OnCall Schedule."
+  time_zone   = "Europe/Amsterdam"
+
+  layer {
+    name                         = "OnCall"
+    start                        = "2024-06-24T00:00:00-00:00"
+    rotation_virtual_start       = "2025-03-17T07:00:00+02:00"
+    rotation_turn_length_seconds = 604800 # one week
+    users = [
+      data.pagerduty_user.user1.id,
+      data.pagerduty_user.user2.id,
+      data.pagerduty_user.user3.id,
+      data.pagerduty_user.user4.id,
+      data.pagerduty_user.user5.id,
+      data.pagerduty_user.user6.id,
+    ]
+  }
+
+  teams = [
+    pagerduty_team.k8s_platform.id,
+    pagerduty_team.k8s_operational.id,
+  ]
+}
+```
+
+**After** — equivalent `pagerduty_schedulev2`:
+
+```hcl
+resource "pagerduty_schedulev2" "example_oncall" {
+  name        = "Example OnCall Schedule"
+  description = "A Example OnCall Schedule."
+  time_zone   = "Europe/Amsterdam"
+
+  teams = [
+    pagerduty_team.k8s_platform.id,
+    pagerduty_team.k8s_operational.id,
+  ]
+
+  rotation {
+    event {
+      name = "OnCall"
+
+      # A 7-day window + weekly recurrence reproduces the legacy
+      # rotation_turn_length_seconds = 604800 (one week per turn).
+      start_time      = "2025-03-17T07:00:00+02:00"
+      end_time        = "2025-03-24T07:00:00+02:00"
+      effective_since = "2025-03-17T07:00:00+02:00"
+      recurrence      = ["RRULE:FREQ=WEEKLY"]
+
+      # The layer's user list becomes rotating members. shifts_per_member = 1
+      # means each member covers one weekly occurrence before handing off.
+      assignment_strategy {
+        type              = "rotating_member_assignment_strategy"
+        shifts_per_member = 1
+
+        member {
+          type    = "user_member"
+          user_id = data.pagerduty_user.user1.id
+        }
+        member {
+          type    = "user_member"
+          user_id = data.pagerduty_user.user2.id
+        }
+        member {
+          type    = "user_member"
+          user_id = data.pagerduty_user.user3.id
+        }
+        member {
+          type    = "user_member"
+          user_id = data.pagerduty_user.user4.id
+        }
+        member {
+          type    = "user_member"
+          user_id = data.pagerduty_user.user5.id
+        }
+        member {
+          type    = "user_member"
+          user_id = data.pagerduty_user.user6.id
+        }
+      }
+    }
+  }
+}
+```
+
+Field mapping:
+
+| Legacy (`pagerduty_schedule`)         | Shift-based (`pagerduty_schedulev2`)                                  |
+| ------------------------------------- | -------------------------------------------------------------------- |
+| `layer`                               | `rotation` (one `rotation` per layer)                                |
+| `layer.name`                          | `rotation.event.name`                                                |
+| `layer.users`                         | `assignment_strategy.member` (one `member` per user)                 |
+| `layer.rotation_turn_length_seconds`  | `event.start_time`/`end_time` window + `recurrence` (e.g. one week → 7-day window + `RRULE:FREQ=WEEKLY`) |
+| `layer.rotation_virtual_start`        | `event.start_time` / `effective_since`                               |
+| `layer.restriction`                   | a narrower `event` window plus a `BYDAY`/`BYHOUR` `RRULE`            |
+| `teams`                               | `teams` (unchanged)                                                  |
+
+~> **Note:** Multiple members rotate when `assignment_strategy.type` is `"rotating_member_assignment_strategy"`; use `"every_member_assignment_strategy"` when everyone should be on call simultaneously. To reproduce a legacy `restriction` (e.g. weekday business hours), narrow the `event` window and encode the days/hours in the `RRULE` — see the *Rotating member assignment* example above.
 
 ## Argument Reference
 

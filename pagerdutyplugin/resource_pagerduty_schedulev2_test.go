@@ -769,3 +769,276 @@ resource "pagerduty_escalation_policy" "test" {
 }
 `, username, email, scheduleName, startTime, endTime, effectiveSince, escalationPolicyName)
 }
+
+// TestAccPagerDutyScheduleV2_MultipleTeamsOrderStable reproduces the team
+// reorder perpetual diff (same class as issue #1001): the v3 API returns a
+// schedule's associated teams in an unstable order, so a `teams` list with more
+// than one entry would show a spurious reorder on every plan. The provider must
+// preserve the prior-state ordering on refresh so re-planning yields no diff.
+func TestAccPagerDutyScheduleV2_MultipleTeamsOrderStable(t *testing.T) {
+	if v := os.Getenv("PAGERDUTY_ACC_SCHEDULE_V3"); v == "" {
+		t.Skip("PAGERDUTY_ACC_SCHEDULE_V3 must be set to run v3 schedule acceptance tests")
+	}
+	username := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	email := fmt.Sprintf("%s@foo.test", username)
+	team1 := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	team2 := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	scheduleName := fmt.Sprintf("tf-%s", acctest.RandString(5))
+
+	effectiveSince := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	startTime := time.Now().UTC().Add(24*time.Hour).Format("2006-01-02") + "T09:00:00Z"
+	endTime := time.Now().UTC().Add(24*time.Hour).Format("2006-01-02") + "T17:00:00Z"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(),
+		CheckDestroy:             testAccCheckPagerDutyScheduleV2Destroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccPagerDutyScheduleV2MultipleTeamsConfig(username, email, team1, team2, scheduleName, effectiveSince, startTime, endTime),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyScheduleV2Exists("pagerduty_schedulev2.test"),
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "teams.#", "2"),
+				),
+			},
+			{
+				// Re-plan with the same config. Fails if the unordered API team
+				// response produces a perpetual reorder diff.
+				Config:             testAccPagerDutyScheduleV2MultipleTeamsConfig(username, email, team1, team2, scheduleName, effectiveSince, startTime, endTime),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
+}
+
+// TestAccPagerDutyScheduleV2_OffsetTimestamps reproduces the "inconsistent
+// result after apply" failure on start_time/end_time supplied with a timezone
+// offset (e.g. "+02:00"). The v3 API normalizes those to UTC ("Z"), so the
+// provider must preserve the configured strings in state when they represent the
+// same instant — both at apply time (consistency check) and on refresh (no diff).
+func TestAccPagerDutyScheduleV2_OffsetTimestamps(t *testing.T) {
+	if v := os.Getenv("PAGERDUTY_ACC_SCHEDULE_V3"); v == "" {
+		t.Skip("PAGERDUTY_ACC_SCHEDULE_V3 must be set to run v3 schedule acceptance tests")
+	}
+	username := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	email := fmt.Sprintf("%s@foo.test", username)
+	scheduleName := fmt.Sprintf("tf-%s", acctest.RandString(5))
+
+	day := time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02")
+	startTime := day + "T09:00:00+02:00"
+	endTime := day + "T17:00:00+02:00"
+	effectiveSince := day + "T09:00:00+02:00"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(),
+		CheckDestroy:             testAccCheckPagerDutyScheduleV2Destroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccPagerDutyScheduleV2Config(username, email, scheduleName, effectiveSince, startTime, endTime),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyScheduleV2Exists("pagerduty_schedulev2.test"),
+					// State must hold the configured offset strings, not the API's UTC form.
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "rotation.0.event.0.start_time", startTime),
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "rotation.0.event.0.end_time", endTime),
+				),
+			},
+			{
+				// Re-plan with the same config. Fails if the UTC-normalized read
+				// value is not reconciled against the configured offset value.
+				Config:             testAccPagerDutyScheduleV2Config(username, email, scheduleName, effectiveSince, startTime, endTime),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
+}
+
+// TestAccPagerDutyScheduleV2_OffsetEffectiveUntil guards the optional
+// effective_until field against the same UTC-normalization problem as
+// start_time/end_time: a timezone-offset value (e.g. "+02:00") would otherwise
+// fail with "Provider produced inconsistent result after apply" on create and a
+// perpetual diff on refresh.
+func TestAccPagerDutyScheduleV2_OffsetEffectiveUntil(t *testing.T) {
+	if v := os.Getenv("PAGERDUTY_ACC_SCHEDULE_V3"); v == "" {
+		t.Skip("PAGERDUTY_ACC_SCHEDULE_V3 must be set to run v3 schedule acceptance tests")
+	}
+	username := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	email := fmt.Sprintf("%s@foo.test", username)
+	scheduleName := fmt.Sprintf("tf-%s", acctest.RandString(5))
+
+	loc := time.FixedZone("UTC+2", 2*3600)
+	day := time.Now().Add(24 * time.Hour)
+	startTime := time.Date(day.Year(), day.Month(), day.Day(), 9, 0, 0, 0, loc).Format(time.RFC3339)
+	endTime := time.Date(day.Year(), day.Month(), day.Day(), 17, 0, 0, 0, loc).Format(time.RFC3339)
+	effectiveSince := time.Date(day.Year(), day.Month(), day.Day(), 9, 0, 0, 0, loc).Format(time.RFC3339)
+	effectiveUntil := time.Now().Add(30 * 24 * time.Hour).In(loc).Format(time.RFC3339)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(),
+		CheckDestroy:             testAccCheckPagerDutyScheduleV2Destroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccPagerDutyScheduleV2EffectiveUntilConfig(username, email, scheduleName, effectiveSince, effectiveUntil, startTime, endTime),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyScheduleV2Exists("pagerduty_schedulev2.test"),
+					// State must hold the configured offset string, not the API's UTC form.
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "rotation.0.event.0.effective_until", effectiveUntil),
+				),
+			},
+			{
+				Config:             testAccPagerDutyScheduleV2EffectiveUntilConfig(username, email, scheduleName, effectiveSince, effectiveUntil, startTime, endTime),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
+}
+
+// TestAccPagerDutyScheduleV2_TimeRepresentationChangeStable guards the
+// reconcile/equality path for active events. When state holds the API's UTC form
+// (e.g. after import) and the config expresses the same instants with a timezone
+// offset, the event is semantically unchanged: it must NOT be DELETE+CREATEd
+// (its server-assigned ID must stay the same) and the apply must not error with
+// "inconsistent result after apply". The event is made active (past
+// effective_since) so a spurious recreate would destroy a live shift.
+func TestAccPagerDutyScheduleV2_TimeRepresentationChangeStable(t *testing.T) {
+	if v := os.Getenv("PAGERDUTY_ACC_SCHEDULE_V3"); v == "" {
+		t.Skip("PAGERDUTY_ACC_SCHEDULE_V3 must be set to run v3 schedule acceptance tests")
+	}
+	username := fmt.Sprintf("tf-%s", acctest.RandString(5))
+	email := fmt.Sprintf("%s@foo.test", username)
+	scheduleName := fmt.Sprintf("tf-%s", acctest.RandString(5))
+
+	// Same instants expressed two ways: UTC "Z" form and an equivalent "+02:00"
+	// offset form. effective_since is in the past so the event is active.
+	loc := time.FixedZone("UTC+2", 2*3600)
+	esInstant := time.Now().UTC().Add(-48 * time.Hour)
+	day := time.Now().UTC().Add(24 * time.Hour)
+	startInstant := time.Date(day.Year(), day.Month(), day.Day(), 9, 0, 0, 0, time.UTC)
+	endInstant := time.Date(day.Year(), day.Month(), day.Day(), 17, 0, 0, 0, time.UTC)
+
+	esZ := esInstant.Format(time.RFC3339)
+	stZ := startInstant.Format(time.RFC3339)
+	etZ := endInstant.Format(time.RFC3339)
+
+	esOff := esInstant.In(loc).Format(time.RFC3339)
+	stOff := startInstant.In(loc).Format(time.RFC3339)
+	etOff := endInstant.In(loc).Format(time.RFC3339)
+
+	var eventID string
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(),
+		CheckDestroy:             testAccCheckPagerDutyScheduleV2Destroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccPagerDutyScheduleV2Config(username, email, scheduleName, esZ, stZ, etZ),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyScheduleV2Exists("pagerduty_schedulev2.test"),
+					testAccStoreScheduleV2EventID("pagerduty_schedulev2.test", &eventID),
+				),
+			},
+			{
+				// Same instants, now in offset form. The event must survive in place.
+				Config: testAccPagerDutyScheduleV2Config(username, email, scheduleName, esOff, stOff, etOff),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPagerDutyScheduleV2Exists("pagerduty_schedulev2.test"),
+					// ID unchanged proves the active event was not recreated.
+					testAccCheckScheduleV2EventIDStable("pagerduty_schedulev2.test", &eventID),
+					// State adopts the configured offset representation.
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "rotation.0.event.0.start_time", stOff),
+					resource.TestCheckResourceAttr("pagerduty_schedulev2.test", "rotation.0.event.0.effective_since", esOff),
+				),
+			},
+			{
+				Config:             testAccPagerDutyScheduleV2Config(username, email, scheduleName, esOff, stOff, etOff),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
+}
+
+// testAccStoreScheduleV2EventID records the first event's server-assigned ID so a
+// later step can assert it did not change.
+func testAccStoreScheduleV2EventID(n string, dst *string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		r, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("not found: %s", n)
+		}
+		id := r.Primary.Attributes["rotation.0.event.0.id"]
+		if id == "" {
+			return fmt.Errorf("no event id set for %s", n)
+		}
+		*dst = id
+		return nil
+	}
+}
+
+// testAccCheckScheduleV2EventIDStable fails if the first event's ID differs from
+// the previously stored value, which would indicate a DELETE+CREATE recreate.
+func testAccCheckScheduleV2EventIDStable(n string, want *string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		r, ok := s.RootModule().Resources[n]
+		if !ok {
+			return fmt.Errorf("not found: %s", n)
+		}
+		got := r.Primary.Attributes["rotation.0.event.0.id"]
+		if got != *want {
+			return fmt.Errorf("event was recreated: id was %q, now %q", *want, got)
+		}
+		return nil
+	}
+}
+
+func testAccPagerDutyScheduleV2MultipleTeamsConfig(username, email, team1, team2, scheduleName, effectiveSince, startTime, endTime string) string {
+	return fmt.Sprintf(`
+resource "pagerduty_user" "test" {
+  name  = "%s"
+  email = "%s"
+}
+
+resource "pagerduty_team" "test1" {
+  name = "%s"
+}
+
+resource "pagerduty_team" "test2" {
+  name = "%s"
+}
+
+resource "pagerduty_schedulev2" "test" {
+  name        = "%s"
+  time_zone   = "America/New_York"
+  description = "Managed by Terraform"
+
+  teams = [
+    pagerduty_team.test1.id,
+    pagerduty_team.test2.id,
+  ]
+
+  rotation {
+    event {
+      name            = "Weekly On-Call"
+      start_time      = "%s"
+      end_time        = "%s"
+      effective_since = "%s"
+      recurrence      = ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"]
+
+      assignment_strategy {
+        type = "rotating_member_assignment_strategy"
+
+        member {
+          type    = "user_member"
+          user_id = pagerduty_user.test.id
+        }
+      }
+    }
+  }
+}
+`, username, email, team1, team2, scheduleName, startTime, endTime, effectiveSince)
+}

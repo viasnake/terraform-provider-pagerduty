@@ -262,6 +262,7 @@ func (r *resourceScheduleV2) createRotationsAndEvents(ctx context.Context, sched
 			// The API normalizes past effective_since dates to current time. Preserve
 			// the config value so the post-apply state matches the plan.
 			flattened.EffectiveSince = evtModel.EffectiveSince
+			preserveConfiguredEventTimes(&evtModel, &flattened)
 			preserveShiftsPerMember(&evtModel, &flattened)
 			updatedEvents = append(updatedEvents, flattened)
 		}
@@ -319,7 +320,7 @@ func (r *resourceScheduleV2) Read(ctx context.Context, req resource.ReadRequest,
 		}
 	}
 
-	updatedState := flattenScheduleV3(ctx, schedule, state.Rotations, &resp.Diagnostics)
+	updatedState := flattenScheduleV3(ctx, schedule, state.Rotations, state.Teams, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -449,7 +450,14 @@ func (r *resourceScheduleV2) reconcileEvents(ctx context.Context, scheduleID, ro
 
 		// Skip the API call when nothing in this event has changed. This avoids
 		// sending effective_since on active events, which the API rejects (400).
+		// Adopt the configured time representations into state first: the equality
+		// check is semantic, so a currentEvt holding the API's UTC form (e.g. after
+		// import) must take the plan's string form to avoid an "inconsistent result
+		// after apply" error.
 		if eventModelsEqual(ctx, desiredEvt, currentEvt) {
+			preserveConfiguredEventTimes(&desiredEvt, &currentEvt)
+			currentEvt.EffectiveSince = desiredEvt.EffectiveSince
+			preserveShiftsPerMember(&desiredEvt, &currentEvt)
 			updatedEvents = append(updatedEvents, currentEvt)
 			continue
 		}
@@ -509,6 +517,7 @@ func (r *resourceScheduleV2) reconcileEvents(ctx context.Context, scheduleID, ro
 			// Preserve the user's configured effective_since in state so subsequent
 			// plans do not show a perpetual diff.
 			flattened.EffectiveSince = desiredEvt.EffectiveSince
+			preserveConfiguredEventTimes(&desiredEvt, &flattened)
 			preserveShiftsPerMember(&desiredEvt, &flattened)
 			updatedEvents = append(updatedEvents, flattened)
 			continue
@@ -547,6 +556,7 @@ func (r *resourceScheduleV2) reconcileEvents(ctx context.Context, scheduleID, ro
 		// The API normalizes past effective_since dates to current time. Preserve
 		// the plan value so the post-apply state matches the plan.
 		flattened.EffectiveSince = desiredEvt.EffectiveSince
+		preserveConfiguredEventTimes(&desiredEvt, &flattened)
 		preserveShiftsPerMember(&desiredEvt, &flattened)
 		updatedEvents = append(updatedEvents, flattened)
 	}
@@ -603,6 +613,7 @@ func (r *resourceScheduleV2) reconcileEvents(ctx context.Context, scheduleID, ro
 		// The API normalizes past effective_since dates to current time. Preserve
 		// the plan value so the post-apply state matches the plan.
 		flattened.EffectiveSince = desiredEvt.EffectiveSince
+		preserveConfiguredEventTimes(&desiredEvt, &flattened)
 		preserveShiftsPerMember(&desiredEvt, &flattened)
 		updatedEvents = append(updatedEvents, flattened)
 	}
@@ -672,7 +683,7 @@ func (r *resourceScheduleV2) ImportState(ctx context.Context, req resource.Impor
 		}
 	}
 
-	state := flattenScheduleV3(ctx, schedule, nil, &resp.Diagnostics)
+	state := flattenScheduleV3(ctx, schedule, nil, types.ListNull(types.StringType), &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -787,16 +798,19 @@ func buildEventV3Input(ctx context.Context, model *eventV2Model, scheduleTimeZon
 	return evt, diags
 }
 
-func flattenScheduleV3(ctx context.Context, schedule *pagerduty.ScheduleV3, stateRotations []rotationV2Model, diags *diag.Diagnostics) resourceScheduleV2Model {
+func flattenScheduleV3(ctx context.Context, schedule *pagerduty.ScheduleV3, stateRotations []rotationV2Model, priorTeams types.List, diags *diag.Diagnostics) resourceScheduleV2Model {
 	// The v3 API normalizes "UTC" to "Etc/UTC". Normalize back to prevent perpetual plan diffs.
 	tz := schedule.TimeZone
 	if tz == "Etc/UTC" {
 		tz = "UTC"
 	}
 
-	teamVals := make([]attr.Value, 0, len(schedule.Teams))
-	for _, t := range schedule.Teams {
-		teamVals = append(teamVals, types.StringValue(t.ID))
+	// The API returns associated teams in an unstable order; preserve the prior
+	// state's ordering to avoid a perpetual reorder diff on the `teams` list.
+	teamIDs := orderedTeamIDs(ctx, priorTeams, schedule.Teams, diags)
+	teamVals := make([]attr.Value, 0, len(teamIDs))
+	for _, id := range teamIDs {
+		teamVals = append(teamVals, types.StringValue(id))
 	}
 	var teamsList types.List
 	if len(teamVals) == 0 {
@@ -843,6 +857,11 @@ func flattenScheduleV3(ctx context.Context, schedule *pagerduty.ScheduleV3, stat
 				}
 				if !st.EndTime.IsNull() && semanticallyEqualTime(st.EndTime.ValueString(), evtModel.EndTime.ValueString()) {
 					evtModel.EndTime = st.EndTime
+				}
+				// effective_until is also UTC-normalized by the API; preserve the
+				// state representation when it denotes the same instant.
+				if semanticallyEqualTimeValue(st.EffectiveUntil, evtModel.EffectiveUntil) {
+					evtModel.EffectiveUntil = st.EffectiveUntil
 				}
 				// The API normalizes past effective_since dates to current time. Preserve
 				// the state value to prevent perpetual plan diffs on subsequent refresh.
@@ -977,7 +996,10 @@ func isEventActive(evt eventV2Model) bool {
 // eventsDifferBeyondEffectiveUntil returns true when the two events differ in
 // any field other than effective_until.
 func eventsDifferBeyondEffectiveUntil(ctx context.Context, a, b eventV2Model) bool {
-	if !a.Name.Equal(b.Name) || !a.EffectiveSince.Equal(b.EffectiveSince) || !a.Recurrence.Equal(b.Recurrence) {
+	// effective_since is compared semantically (the API normalizes it to UTC); a
+	// representation-only change must not be reported as a difference, since for an
+	// active event that would force a DELETE+CREATE of a live shift.
+	if !a.Name.Equal(b.Name) || !semanticallyEqualTime(a.EffectiveSince.ValueString(), b.EffectiveSince.ValueString()) || !a.Recurrence.Equal(b.Recurrence) {
 		return true
 	}
 	if !semanticallyEqualTime(a.StartTime.ValueString(), b.StartTime.ValueString()) ||
@@ -1007,9 +1029,13 @@ func eventsDifferBeyondEffectiveUntil(ctx context.Context, a, b eventV2Model) bo
 // eventModelsEqual returns true when two event models are identical in all
 // user-configurable fields, so the API update can be safely skipped.
 func eventModelsEqual(ctx context.Context, a, b eventV2Model) bool {
+	// All time fields are compared semantically: the API normalizes them to UTC,
+	// so two different string representations of the same instant must count as
+	// equal, otherwise an unchanged event is treated as modified (and an active
+	// event would be needlessly DELETE+CREATEd).
 	if !a.Name.Equal(b.Name) ||
-		!a.EffectiveSince.Equal(b.EffectiveSince) ||
-		!a.EffectiveUntil.Equal(b.EffectiveUntil) ||
+		!semanticallyEqualTime(a.EffectiveSince.ValueString(), b.EffectiveSince.ValueString()) ||
+		!semanticallyEqualTimeValue(a.EffectiveUntil, b.EffectiveUntil) ||
 		!a.Recurrence.Equal(b.Recurrence) {
 		return false
 	}
@@ -1061,6 +1087,58 @@ func preserveShiftsPerMember(desired, flattened *eventV2Model) {
 	}
 }
 
+// preserveConfiguredEventTimes keeps the user's configured start_time/end_time
+// strings in state when they represent the same instant the API returned. The v3
+// API normalizes times to UTC (e.g. "...+02:00" becomes "...Z"), so without this
+// the create/update paths would store a different string than the plan, tripping
+// Terraform's "provider produced inconsistent result after apply" check.
+func preserveConfiguredEventTimes(desired, flattened *eventV2Model) {
+	if !desired.StartTime.IsNull() && semanticallyEqualTime(desired.StartTime.ValueString(), flattened.StartTime.ValueString()) {
+		flattened.StartTime = desired.StartTime
+	}
+	if !desired.EndTime.IsNull() && semanticallyEqualTime(desired.EndTime.ValueString(), flattened.EndTime.ValueString()) {
+		flattened.EndTime = desired.EndTime
+	}
+	// effective_until is an optional ISO-8601 field the API also normalizes to
+	// UTC, so it needs the same representation-preserving guard.
+	if semanticallyEqualTimeValue(desired.EffectiveUntil, flattened.EffectiveUntil) {
+		flattened.EffectiveUntil = desired.EffectiveUntil
+	}
+}
+
+// orderedTeamIDs reconciles the API's team list against the order recorded in
+// prior state. The v3 API returns associated teams in an unstable order, which
+// would otherwise show as a perpetual reorder diff on a `teams` list. Team IDs
+// present in prior state keep their original position; teams added out-of-band
+// (present in the API response but not in state) are appended in API order.
+func orderedTeamIDs(ctx context.Context, priorTeams types.List, apiTeams []pagerduty.TeamReferenceV3, diags *diag.Diagnostics) []string {
+	inAPI := make(map[string]bool, len(apiTeams))
+	for _, t := range apiTeams {
+		inAPI[t.ID] = true
+	}
+
+	var prior []string
+	if !priorTeams.IsNull() && !priorTeams.IsUnknown() {
+		diags.Append(priorTeams.ElementsAs(ctx, &prior, false)...)
+	}
+
+	result := make([]string, 0, len(apiTeams))
+	seen := make(map[string]bool, len(apiTeams))
+	for _, id := range prior {
+		if inAPI[id] && !seen[id] {
+			result = append(result, id)
+			seen[id] = true
+		}
+	}
+	for _, t := range apiTeams {
+		if !seen[t.ID] {
+			result = append(result, t.ID)
+			seen[t.ID] = true
+		}
+	}
+	return result
+}
+
 // semanticallyEqualTime returns true if two RFC3339 time strings represent the same instant.
 // Used to prevent perpetual plan diffs when the v3 API normalizes times to UTC.
 func semanticallyEqualTime(a, b string) bool {
@@ -1070,4 +1148,14 @@ func semanticallyEqualTime(a, b string) bool {
 		return false
 	}
 	return ta.Equal(tb)
+}
+
+// semanticallyEqualTimeValue is the nullable counterpart of semanticallyEqualTime
+// for optional time attributes (e.g. effective_until). Two null values are equal;
+// a null and a non-null are not; otherwise the underlying instants are compared.
+func semanticallyEqualTimeValue(a, b types.String) bool {
+	if a.IsNull() || b.IsNull() {
+		return a.IsNull() && b.IsNull()
+	}
+	return semanticallyEqualTime(a.ValueString(), b.ValueString())
 }
