@@ -1,4 +1,4 @@
-## v3.33.1 (Unreleased)
+## v3.33.1 (Jun 30, 2026)
 
 BUG FIXES
 * `resource/pagerduty_schedulev2`: Preserve the configured `teams` ordering on refresh so a schedule associated with more than one team no longer shows a perpetual reorder diff ([1127](https://github.com/PagerDuty/terraform-provider-pagerduty/issues/1127))
