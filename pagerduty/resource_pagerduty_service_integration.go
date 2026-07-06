@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PagerDuty/terraform-provider-pagerduty/util"
 	"github.com/hashicorp/go-cty/cty"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
@@ -751,6 +752,12 @@ func resourcePagerDutyServiceIntegrationCreate(d *schema.ResourceData, meta inte
 
 	retryErr := retry.Retry(2*time.Minute, func() *retry.RetryError {
 		if serviceIntegration, _, err := client.Services.CreateIntegration(service, serviceIntegration); err != nil {
+			// The API rejects integrations on the Default Mobilization Service with a
+			// 400, which is otherwise retryable here; short-circuit so the operator
+			// sees the actionable message immediately instead of after the retry loop.
+			if util.IsDefaultMobilizationServiceError(err) {
+				return retry.NonRetryableError(util.DMSMsgServiceIntegrationCreate.Error(err))
+			}
 			if isErrCode(err, 400) {
 				return retry.RetryableError(err)
 			}

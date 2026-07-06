@@ -573,6 +573,9 @@ func resourcePagerDutyServiceDelete(d *schema.ResourceData, meta interface{}) er
 	log.Printf("[INFO] Deleting PagerDuty service %s", d.Id())
 
 	if _, err := client.Services.Delete(d.Id()); err != nil {
+		if util.IsDefaultMobilizationServiceError(err) {
+			return util.DMSMsgServiceDelete.Error(err)
+		}
 		return handleNotFoundError(err, d)
 	}
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PagerDuty/terraform-provider-pagerduty/util"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
@@ -322,6 +323,9 @@ func resourcePagerDutyEventOrchestrationPathRouterUpdate(ctx context.Context, d 
 	retryErr := retry.RetryContext(ctx, 2*time.Minute, func() *retry.RetryError {
 		response, _, err := client.EventOrchestrationPaths.UpdateContext(ctx, routerPath.Parent.ID, "router", routerPath)
 		if err != nil {
+			if util.IsDefaultMobilizationServiceError(err) {
+				return retry.NonRetryableError(util.DMSMsgOrchestrationRouter.Error(err))
+			}
 			if isErrCode(err, http.StatusBadRequest) {
 				return retry.NonRetryableError(err)
 			}
