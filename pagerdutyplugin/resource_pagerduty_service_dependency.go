@@ -326,6 +326,10 @@ func (r *resourceServiceDependency) Delete(ctx context.Context, req resource.Del
 		return nil
 	})
 	if err != nil && !util.IsNotFoundError(err) {
+		if util.IsDefaultMobilizationServiceError(err) {
+			resp.Diagnostics.AddError(util.DMSMsgServiceDependency.Diagnostic(err))
+			return
+		}
 		resp.Diagnostics.AddError(
 			fmt.Sprintf("Error deleting PagerDuty service dependency %s (%s) dependent of %s", id, rt, depID),
 			err.Error(),

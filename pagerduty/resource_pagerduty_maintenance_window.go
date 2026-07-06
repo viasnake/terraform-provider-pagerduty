@@ -134,6 +134,9 @@ func resourcePagerDutyMaintenanceWindowUpdate(d *schema.ResourceData, meta inter
 	log.Printf("[INFO] Updating PagerDuty maintenance window %s", d.Id())
 
 	if _, _, err := client.MaintenanceWindows.Update(d.Id(), window); err != nil {
+		if util.IsDefaultMobilizationServiceError(err) {
+			return util.DMSMsgMaintenanceWindow.Error(err)
+		}
 		return err
 	}
 
