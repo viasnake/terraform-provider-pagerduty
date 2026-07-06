@@ -5,13 +5,18 @@ import (
 	"strings"
 )
 
-// DefaultMobilizationServiceErrSignal is the substring the PagerDuty API includes
-// in its error whenever an operation is rejected for targeting the account's
-// Default Mobilization Service (formerly the "Triage service"). Both the heimweh
-// and PagerDuty go-pagerduty clients embed the API message in their Error()
-// output, so this single substring check identifies the condition regardless of
-// which client produced the error, without an extra lookup call.
-const DefaultMobilizationServiceErrSignal = "Account Default Mobilization Service"
+// defaultMobilizationServiceErrSignals are the substrings the PagerDuty API is
+// known to include in its error whenever an operation is rejected for targeting
+// the account's Default Mobilization Service. Both the heimweh and PagerDuty
+// go-pagerduty clients embed the API message in their Error() output, so a
+// substring check identifies the condition regardless of which client produced
+// the error, without an extra lookup call. The API uses inconsistent wording
+// across endpoints (e.g. "triage service" for integration and maintenance
+// window creation), so we check for all known variants.
+var defaultMobilizationServiceErrSignals = []string{
+	"Account Default Mobilization Service",
+	"triage service",
+}
 
 // defaultMobilizationServiceSuffix is the shared trailing guidance appended to
 // every Default Mobilization Service message so operators get consistent
@@ -64,7 +69,16 @@ var (
 // IsDefaultMobilizationServiceError reports whether err was returned by the API
 // because the operation targeted the Default Mobilization Service.
 func IsDefaultMobilizationServiceError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), DefaultMobilizationServiceErrSignal)
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, signal := range defaultMobilizationServiceErrSignals {
+		if strings.Contains(msg, signal) {
+			return true
+		}
+	}
+	return false
 }
 
 // Error renders the message as a single-string error for SDKv2 resources,

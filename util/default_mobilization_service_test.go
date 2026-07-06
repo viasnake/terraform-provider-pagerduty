@@ -40,6 +40,20 @@ func TestIsDefaultMobilizationServiceError(t *testing.T) {
 			err:  fmt.Errorf("Error reading: PXXXXXX: %w", errors.New("failed 403 Forbidden. Errors: [Account Default Mobilization Service cannot be deleted]")),
 			want: true,
 		},
+		{
+			// Confirmed against a live 422 from POST .../services/PXXXXXX/integrations:
+			// "Errors: [Integrations cannot be created on a triage service]".
+			name: "triage service wording - integration create",
+			err:  errors.New("POST API call to https://api.pd-staging.com/services/PXXXXXX/integrations failed 422 Unprocessable Entity. Code: 2001, Errors: [Integrations cannot be created on a triage service], Message: Invalid Input Provided"),
+			want: true,
+		},
+		{
+			// Confirmed against a live 422 from POST .../maintenance_windows:
+			// "Errors: [Maintenance windows cannot include the triage service.]".
+			name: "triage service wording - maintenance window create",
+			err:  errors.New("POST API call to https://api.pd-staging.com/maintenance_windows failed 422 Unprocessable Entity. Code: 2001, Errors: [Maintenance windows cannot include the triage service.], Message: Invalid Input Provided"),
+			want: true,
+		},
 	}
 
 	for _, tc := range cases {
