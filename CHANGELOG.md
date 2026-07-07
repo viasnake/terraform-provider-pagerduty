@@ -2,7 +2,7 @@
 
 ENHANCEMENTS
 * `resource/pagerduty_service`: Return a clear, actionable error when the API rejects deleting the Default Mobilization Service, instead of the raw API error ([FDE-894])
-* `resource/pagerduty_service_integration`: Return a clear, actionable error when the API rejects adding an integration to the Default Mobilization Service, and surface it immediately instead of retrying the rejected request ([FDE-894])
+* `resource/pagerduty_service_integration`: Return a clear, actionable error when the API rejects adding an integration to the Default Mobilization Service ([FDE-894])
 * `resource/pagerduty_event_orchestration_path_router`: Return a clear, actionable error when the API rejects routing events to the Default Mobilization Service ([FDE-894])
 * `resource/pagerduty_event_orchestration_path_service`: Return a clear, actionable error when the API rejects configuring orchestration for the Default Mobilization Service ([FDE-894])
 * `resource/pagerduty_service_dependency`: Return a clear, actionable error when the API rejects using the Default Mobilization Service in a service dependency ([FDE-894])

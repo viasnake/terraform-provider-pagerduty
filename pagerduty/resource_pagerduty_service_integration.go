@@ -753,8 +753,8 @@ func resourcePagerDutyServiceIntegrationCreate(d *schema.ResourceData, meta inte
 	retryErr := retry.Retry(2*time.Minute, func() *retry.RetryError {
 		if serviceIntegration, _, err := client.Services.CreateIntegration(service, serviceIntegration); err != nil {
 			// The API rejects integrations on the Default Mobilization Service with a
-			// 400, which is otherwise retryable here; short-circuit so the operator
-			// sees the actionable message immediately instead of after the retry loop.
+			// 422, which already falls through to NonRetryableError below; catch it
+			// here only to swap the raw API error for the actionable message.
 			if util.IsDefaultMobilizationServiceError(err) {
 				return retry.NonRetryableError(util.DMSMsgServiceIntegrationCreate.Error(err))
 			}
