@@ -11,11 +11,19 @@ import (
 // go-pagerduty clients embed the API message in their Error() output, so a
 // substring check identifies the condition regardless of which client produced
 // the error, without an extra lookup call. The API uses inconsistent wording
-// across endpoints (e.g. "triage service" for integration and maintenance
-// window creation), so we check for all known variants.
+// across endpoints, so we check for all known variants.
+//
+// Signals are matched case-insensitively against the full confirmed phrase
+// rather than the bare words "triage service" — IsDefaultMobilizationServiceError
+// also gates retry decisions (see the event_orchestration_path_* update paths),
+// so a false positive there doesn't just show the wrong message, it can turn a
+// genuinely retryable error into a hard failure. Matching only the exact
+// observed phrases keeps this from tripping on an unrelated error that happens
+// to mention a user-named service containing "triage service".
 var defaultMobilizationServiceErrSignals = []string{
-	"Account Default Mobilization Service",
-	"triage service",
+	"account default mobilization service",
+	"cannot be created on a triage service",
+	"cannot include the triage service",
 }
 
 // defaultMobilizationServiceSuffix is the shared trailing guidance appended to
@@ -72,7 +80,7 @@ func IsDefaultMobilizationServiceError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
+	msg := strings.ToLower(err.Error())
 	for _, signal := range defaultMobilizationServiceErrSignals {
 		if strings.Contains(msg, signal) {
 			return true
