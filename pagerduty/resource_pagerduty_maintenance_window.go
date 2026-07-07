@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/PagerDuty/terraform-provider-pagerduty/util"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/heimweh/go-pagerduty/pagerduty"
@@ -75,6 +76,9 @@ func resourcePagerDutyMaintenanceWindowCreate(d *schema.ResourceData, meta inter
 
 	window, _, err = client.MaintenanceWindows.Create(window)
 	if err != nil {
+		if util.IsDefaultMobilizationServiceError(err) {
+			return util.DMSMsgMaintenanceWindow.Error(err)
+		}
 		return err
 	}
 
@@ -130,6 +134,9 @@ func resourcePagerDutyMaintenanceWindowUpdate(d *schema.ResourceData, meta inter
 	log.Printf("[INFO] Updating PagerDuty maintenance window %s", d.Id())
 
 	if _, _, err := client.MaintenanceWindows.Update(d.Id(), window); err != nil {
+		if util.IsDefaultMobilizationServiceError(err) {
+			return util.DMSMsgMaintenanceWindow.Error(err)
+		}
 		return err
 	}
 

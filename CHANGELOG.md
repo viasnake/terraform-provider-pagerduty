@@ -1,3 +1,13 @@
+## v3.34.0 (Jul 7, 2026)
+
+ENHANCEMENTS
+* `resource/pagerduty_service`: Return a clear, actionable error when the API rejects deleting the Default Mobilization Service, instead of the raw API error ([1133](https://github.com/PagerDuty/terraform-provider-pagerduty/pull/1133))
+* `resource/pagerduty_service_integration`: Return a clear, actionable error when the API rejects adding an integration to the Default Mobilization Service ([1133](https://github.com/PagerDuty/terraform-provider-pagerduty/pull/1133))
+* `resource/pagerduty_event_orchestration_path_router`: Return a clear, actionable error when the API rejects routing events to the Default Mobilization Service ([1133](https://github.com/PagerDuty/terraform-provider-pagerduty/pull/1133))
+* `resource/pagerduty_event_orchestration_path_service`: Return a clear, actionable error when the API rejects configuring orchestration for the Default Mobilization Service ([1133](https://github.com/PagerDuty/terraform-provider-pagerduty/pull/1133))
+* `resource/pagerduty_service_dependency`: Return a clear, actionable error when the API rejects using the Default Mobilization Service in a service dependency ([1133](https://github.com/PagerDuty/terraform-provider-pagerduty/pull/1133))
+* `resource/pagerduty_maintenance_window`: Return a clear, actionable error when the API rejects targeting the Default Mobilization Service with a maintenance window ([1133](https://github.com/PagerDuty/terraform-provider-pagerduty/pull/1133))
+
 ## v3.33.1 (Jun 30, 2026)
 
 BUG FIXES

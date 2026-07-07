@@ -176,7 +176,9 @@ func (r *resourceServiceDependency) Create(ctx context.Context, req resource.Cre
 		return nil
 	})
 	if err != nil {
-		if util.IsNotFoundError(err) {
+		if util.IsDefaultMobilizationServiceError(err) {
+			resp.Diagnostics.AddError(util.DMSMsgServiceDependency.Diagnostic(err))
+		} else if util.IsNotFoundError(err) {
 			resp.Diagnostics.AddError("Error associating service dependency",
 				fmt.Sprintf("%s\n\nThis error persisted after retries, indicating either:\n"+
 					"1. Supporting service (ID: %s) doesn't exist in your PagerDuty account\n"+
@@ -324,6 +326,10 @@ func (r *resourceServiceDependency) Delete(ctx context.Context, req resource.Del
 		return nil
 	})
 	if err != nil && !util.IsNotFoundError(err) {
+		if util.IsDefaultMobilizationServiceError(err) {
+			resp.Diagnostics.AddError(util.DMSMsgServiceDependency.Diagnostic(err))
+			return
+		}
 		resp.Diagnostics.AddError(
 			fmt.Sprintf("Error deleting PagerDuty service dependency %s (%s) dependent of %s", id, rt, depID),
 			err.Error(),
